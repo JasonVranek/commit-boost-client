@@ -316,7 +316,7 @@ jobs:
         with:
           files: ./artifacts/**/*
           draft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
         env:
