@@ -1,2 +1,3 @@
 - trial 1 of new release pattern V0.9.9-rc1
 - trial 2 of new release pattern v0.9.9
+- trial 3 of new release pattern v0.9.10
