@@ -322,9 +322,49 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Fast-forwards stable (full release) or beta (RC) to the new tag.
+  # Runs after all artifacts are built and the draft release is created,
+  # so stable/beta are never touched if any part of the pipeline fails.
+  fast-forward-branch:
+    needs:
+      - finalize-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "commit-boost-release-bot[bot]"
+          git config user.email "commit-boost-release-bot[bot]@users.noreply.github.com"
+
+      - name: Fast-forward beta branch (RC releases)
+        if: contains(github.ref_name, '-rc')
+        run: |
+          git checkout beta
+          git merge --ff-only "${{ github.ref_name }}"
+          git push origin beta
+
+      - name: Fast-forward stable branch (full releases)
+        if: "!contains(github.ref_name, '-rc')"
+        run: |
+          git checkout stable
+          git merge --ff-only "${{ github.ref_name }}"
+          git push origin stable
+
   # Deletes the tag if any job in the release pipeline fails.
   # This keeps the tag and release artifacts in sync — a tag should only
   # exist if the full pipeline completed successfully.
+  # stable/beta are never touched on failure since fast-forward-branch
+  # only runs after finalize-release succeeds.
   #
   # Note: if finalize-release specifically fails, a draft release may already
   # exist on GitHub pointing at the now-deleted tag and will need manual cleanup.
@@ -336,6 +376,7 @@ jobs:
       - build-and-push-pbs-docker
       - build-and-push-signer-docker
       - finalize-release
+      - fast-forward-branch
     runs-on: ubuntu-latest
     if: failure()
     steps:

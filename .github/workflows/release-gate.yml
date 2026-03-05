@@ -89,19 +89,5 @@ jobs:
           VERSION="${{ steps.version.outputs.new }}"
           git tag "$VERSION" HEAD
           git push origin "$VERSION"
-
-      - name: Fast-forward beta branch (RC releases)
-        if: steps.version.outputs.is_rc == 'true'
-        run: |
-          VERSION="${{ steps.version.outputs.new }}"
-          git checkout beta
-          git merge --ff-only "$VERSION"
-          git push origin beta
-
-      - name: Fast-forward stable branch (full releases)
-        if: steps.version.outputs.is_rc == 'false'
-        run: |
-          VERSION="${{ steps.version.outputs.new }}"
-          git checkout stable
-          git merge --ff-only "$VERSION"
-          git push origin stable
+          # Branch fast-forwarding happens in release.yml after all artifacts
+          # are successfully built. stable/beta are never touched if the build fails.
