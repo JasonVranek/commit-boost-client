@@ -321,3 +321,33 @@ jobs:
           name: ${{ github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Deletes the tag if any job in the release pipeline fails.
+  # This keeps the tag and release artifacts in sync — a tag should only
+  # exist if the full pipeline completed successfully.
+  #
+  # Note: if finalize-release specifically fails, a draft release may already
+  # exist on GitHub pointing at the now-deleted tag and will need manual cleanup.
+  cleanup-on-failure:
+    needs:
+      - build-binaries-linux
+      - build-binaries-darwin
+      - sign-binaries
+      - build-and-push-pbs-docker
+      - build-and-push-signer-docker
+      - finalize-release
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Delete tag
+        run: git push origin --delete ${{ github.ref_name }}
