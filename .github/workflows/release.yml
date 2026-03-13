@@ -289,6 +289,7 @@ jobs:
             ${{ !contains(github.ref_name, 'rc') && format('ghcr.io/{0}/signer:latest', env.OWNER) || '' }}
           file: provisioning/signer.Dockerfile
 
+  # Creates a release on GitHub with the binaries
   finalize-release:
     needs:
       - build-binaries-linux
@@ -329,7 +330,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-rc') }}
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body_path: .github/release-notes-template.md
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
