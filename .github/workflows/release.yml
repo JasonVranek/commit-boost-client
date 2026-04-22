@@ -63,8 +63,8 @@ jobs:
           context: .
           push: false
           platforms: linux/amd64,linux/arm64
-          cache-from: type=registry,ref=ghcr.io/commit-boost/buildcache:${{ matrix.target-crate}}
-          cache-to: type=registry,ref=ghcr.io/commit-boost/buildcache:${{ matrix.target-crate }},mode=max
+          # cache-from: type=registry,ref=ghcr.io/commit-boost/buildcache:${{ matrix.target-crate}}
+          # cache-to: type=registry,ref=ghcr.io/commit-boost/buildcache:${{ matrix.target-crate }},mode=max
           file: provisioning/build.Dockerfile
           outputs: type=local,dest=build
           build-args: |
@@ -201,7 +201,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
             BINARIES_PATH=./artifacts/bin
@@ -253,7 +253,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
             BINARIES_PATH=./artifacts/bin
