@@ -50,7 +50,7 @@ RUN if [ "$BUILDPLATFORM" = "linux/amd64" -a "$TARGETARCH" = "arm64" ]; then \
       echo "export OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> ${BUILD_VAR_SCRIPT}; \
     fi
 
-# Run cook to prep the build 
+# Run cook to prep the build
 RUN if [ -f ${BUILD_VAR_SCRIPT} ]; then \
       chmod +x ${BUILD_VAR_SCRIPT} && \
       . ${BUILD_VAR_SCRIPT} && \
@@ -73,6 +73,7 @@ COPY . .
 RUN if [ -f ${BUILD_VAR_SCRIPT} ]; then \
       chmod +x ${BUILD_VAR_SCRIPT} && \
       . ${BUILD_VAR_SCRIPT} && \
+       rustup target add ${TARGET} && \
       echo "Cross-compilation environment set up for ${TARGET}"; \
     else \
       echo "No cross-compilation needed"; \
