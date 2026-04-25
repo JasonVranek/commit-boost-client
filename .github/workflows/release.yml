@@ -1,9 +1,16 @@
 name: Draft Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.2.3)'
+        required: true
+        type: string
+      commit:
+        description: 'Commit SHA to build from'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,7 +18,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +37,7 @@ jobs:
       - name: Check is-latest
         id: is_latest
         run: |
-          VALUE=$(python .github/workflows/release/release.py is-latest "${{ github.ref_name }}")
+          VALUE=$(python .github/workflows/release/release.py is-latest "${{ inputs.tag }}")
           echo "value=$VALUE" >> $GITHUB_OUTPUT
 
   # Builds the x64 and arm64 binaries for Linux, for all 3 crates, via the Docker builder
@@ -62,6 +69,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -101,15 +109,15 @@ jobs:
       - name: Package binary (Linux)
         run: |
           cd build/linux_${{ matrix.target }}
-          tar -czvf ${{ matrix.name }}-${{ github.ref_name }}-linux_${{ matrix.package-suffix }}.tar.gz ${{ matrix.name }}
-          mv ${{ matrix.name }}-${{ github.ref_name }}-linux_${{ matrix.package-suffix }}.tar.gz ../../
+          tar -czvf ${{ matrix.name }}-${{ inputs.tag }}-linux_${{ matrix.package-suffix }}.tar.gz ${{ matrix.name }}
+          mv ${{ matrix.name }}-${{ inputs.tag }}-linux_${{ matrix.package-suffix }}.tar.gz ../../
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-${{ github.ref_name }}-linux_${{ matrix.package-suffix }}
+          name: ${{ matrix.name }}-${{ inputs.tag }}-linux_${{ matrix.package-suffix }}
           path: |
-            ${{ matrix.name }}-${{ github.ref_name }}-linux_${{ matrix.package-suffix }}.tar.gz
+            ${{ matrix.name }}-${{ inputs.tag }}-linux_${{ matrix.package-suffix }}.tar.gz
 
   # Builds the arm64 binaries for Darwin, for all 3 crates, natively
   build-binaries-darwin:
@@ -137,6 +145,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -178,15 +187,15 @@ jobs:
       - name: Package binary (Darwin)
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ${{ matrix.name }}-${{ github.ref_name }}-darwin_${{ matrix.package-suffix }}.tar.gz ${{ matrix.name }}
-          mv ${{ matrix.name }}-${{ github.ref_name }}-darwin_${{ matrix.package-suffix }}.tar.gz ../../../
+          tar -czvf ${{ matrix.name }}-${{ inputs.tag }}-darwin_${{ matrix.package-suffix }}.tar.gz ${{ matrix.name }}
+          mv ${{ matrix.name }}-${{ inputs.tag }}-darwin_${{ matrix.package-suffix }}.tar.gz ../../../
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-${{ github.ref_name }}-darwin_${{ matrix.package-suffix }}
+          name: ${{ matrix.name }}-${{ inputs.tag }}-darwin_${{ matrix.package-suffix }}
           path: |
-            ${{ matrix.name }}-${{ github.ref_name }}-darwin_${{ matrix.package-suffix }}.tar.gz
+            ${{ matrix.name }}-${{ inputs.tag }}-darwin_${{ matrix.package-suffix }}.tar.gz
 
   # Builds and pushes Docker images for both PBS and Signer
   build-and-push-docker:
@@ -200,6 +209,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -213,9 +223,9 @@ jobs:
         run: |
           mkdir -p ./artifacts/bin/linux_amd64
           mkdir -p ./artifacts/bin/linux_arm64
-          tar -xzf ./artifacts/commit-boost-${{ matrix.crate }}-${{ github.ref_name }}-linux_x86-64/commit-boost-${{ matrix.crate }}-${{ github.ref_name }}-linux_x86-64.tar.gz -C ./artifacts/bin
+          tar -xzf ./artifacts/commit-boost-${{ matrix.crate }}-${{ inputs.tag }}-linux_x86-64/commit-boost-${{ matrix.crate }}-${{ inputs.tag }}-linux_x86-64.tar.gz -C ./artifacts/bin
           mv ./artifacts/bin/commit-boost-${{ matrix.crate }} ./artifacts/bin/linux_amd64/commit-boost-${{ matrix.crate }}
-          tar -xzf ./artifacts/commit-boost-${{ matrix.crate }}-${{ github.ref_name }}-linux_arm64/commit-boost-${{ matrix.crate }}-${{ github.ref_name }}-linux_arm64.tar.gz -C ./artifacts/bin
+          tar -xzf ./artifacts/commit-boost-${{ matrix.crate }}-${{ inputs.tag }}-linux_arm64/commit-boost-${{ matrix.crate }}-${{ inputs.tag }}-linux_arm64.tar.gz -C ./artifacts/bin
           mv ./artifacts/bin/commit-boost-${{ matrix.crate }} ./artifacts/bin/linux_arm64/commit-boost-${{ matrix.crate }}
 
       - name: Set lowercase owner
@@ -243,11 +253,11 @@ jobs:
           build-args: |
             BINARIES_PATH=./artifacts/bin
           tags: |
-            ghcr.io/${{ env.OWNER }}/${{ matrix.crate }}:${{ github.ref_name }}
+            ghcr.io/${{ env.OWNER }}/${{ matrix.crate }}:${{ inputs.tag }}
             ${{ needs.determine-latest.outputs.value == 'true' && format('ghcr.io/{0}/{1}:latest', env.OWNER, matrix.crate) || '' }}
           file: provisioning/${{ matrix.crate }}.Dockerfile
 
-  # Signs all Linux binaries with Sigstore for provenance
+  # Signs all binaries with Sigstore for provenance
   sign-binaries:
     needs: [build-binaries-linux, build-binaries-darwin]
     runs-on: ubuntu-latest
@@ -267,7 +277,7 @@ jobs:
       - name: Upload signed artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: signed-${{ github.ref_name }}
+          name: signed-${{ inputs.tag }}
           path: ./artifacts/**/*.sigstore*
 
   # Creates a draft release on GitHub with the binaries
@@ -298,7 +308,7 @@ jobs:
           files: ./artifacts/**/*
           draft: true
           prerelease: false
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
