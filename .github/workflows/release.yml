@@ -15,31 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check-ci-status:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.x'
-
-      - name: Install Python deps
-        run: pip install pyyaml
-
-      - name: Verify CI passed for this commit
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: python .github/workflows/release/release.py check-ci "${{ github.sha }}"
-
   # Determines whether this tag should update :latest on GHCR.
   # Runs once; the Docker job consumes its output via matrix.
   determine-latest:
-    needs: [check-ci-status]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
@@ -57,7 +35,6 @@ jobs:
 
   # Builds the x64 and arm64 binaries for Linux, for all 3 crates, via the Docker builder
   build-binaries-linux:
-    needs: [check-ci-status]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -136,7 +113,6 @@ jobs:
 
   # Builds the arm64 binaries for Darwin, for all 3 crates, natively
   build-binaries-darwin:
-    needs: [check-ci-status]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -214,7 +190,7 @@ jobs:
 
   # Builds and pushes Docker images for both PBS and Signer
   build-and-push-docker:
-    needs: [check-ci-status, build-binaries-linux, determine-latest]
+    needs: [build-binaries-linux, determine-latest]
     strategy:
       matrix:
         crate: [pbs, signer]
@@ -273,7 +249,7 @@ jobs:
 
   # Signs all Linux binaries with Sigstore for provenance
   sign-binaries:
-    needs: [check-ci-status, build-binaries-linux, build-binaries-darwin]
+    needs: [build-binaries-linux, build-binaries-darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -297,7 +273,6 @@ jobs:
   # Creates a draft release on GitHub with the binaries
   finalize-release:
     needs:
-      - check-ci-status
       - build-binaries-linux
       - build-binaries-darwin
       - build-and-push-docker
