@@ -63,7 +63,7 @@ jobs:
 
       - name: Dispatch release workflow
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run release.yml \
             --ref main \
