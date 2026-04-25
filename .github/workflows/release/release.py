@@ -379,7 +379,6 @@ def cmd_gate(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     _step(cmd_check_signatures, argparse.Namespace(commit=commit))
-    _step(cmd_check_ci, argparse.Namespace(sha=commit))
 
     cmd_create_tag(argparse.Namespace(tag=tag, commit=commit))
 

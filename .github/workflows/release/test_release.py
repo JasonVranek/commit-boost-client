@@ -788,10 +788,6 @@ class TestGate:
 
             def gh_side_effect(method, path_, **kwargs):
                 if "/commits/" in path_ and method == "GET":
-                    if "check-runs" in path_:
-                        return {"check_runs": [
-                            {"name": "ci", "status": "completed", "conclusion": "success"},
-                        ]}
                     return {"sha": commit_sha}
                 if "/git/refs/tags/" in path_ and method == "GET":
                     raise GhApiError("not found")
