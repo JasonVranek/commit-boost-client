@@ -23,19 +23,24 @@ The user-facing release procedure lives in [`.releases/README.md`](../../../.rel
    ┌──────────────▼─────────────────────────────┐
    │ 3. release-gate.yml runs (post-merge)      │
    │    → release.py gate                       │
-   │    Creates signed tag via GitHub API       │
-   │    (POST /git/tags + POST /git/refs)       │
+   │    Re-validates everything (filename,      │
+   │    schema, commit exists, tag free,        │
+   │    signatures) then creates signed tag     │
+   │    via GitHub API                          │
    └──────────────┬─────────────────────────────┘
                   │  (tag push triggers next workflow)
    ┌──────────────▼─────────────────────────────┐
    │ 4. release.yml runs (on tag push)          │
    │    Builds binaries (linux x64+arm64,       │
    │    darwin arm64), pushes Docker images,    │
-   │    drafts GitHub Release. determine-latest │
-   │    job calls release.py is-latest to       │
-   │    decide whether to update :latest        │
+   │    signs binaries with Sigstore, drafts    │
+   │    GitHub Release. determine-latest job    │
+   │    calls release.py is-latest to decide    │
+   │    whether to update :latest               │
    └────────────────────────────────────────────┘
 ```
+
+**Why the gate re-validates:** These are three independent workflow files triggered by different GitHub events (`pull_request`, `pull_request: closed`, `push: tags`). GitHub Actions has no cross-workflow `needs` — a job in one workflow cannot depend on a job in another. If a PR is force-merged while `validate-release-request` is failing, the gate is the last line of defense before a tag is created. It runs the full validation suite so a bad release request cannot slip through.
 
 ## Example release-request YAML
 
@@ -89,7 +94,7 @@ uv handles Python and dependencies in one shot. From the repo root:
 uv run --with pyyaml --with pytest pytest .github/workflows/release/test_release.py -v
 ```
 
-That command provisions a Python environment with `pyyaml` and `pytest`, then runs the suite. No `venv activate`, no `pip install`, no system Python pollution. Expected output: `61 passed`.
+That command provisions a Python environment with `pyyaml` and `pytest`, then runs the suite. No `venv activate`, no `pip install`, no system Python pollution. Expected output: `65 passed`.
 
 ### Run a subcommand
 
@@ -151,7 +156,7 @@ Every subcommand exits 0 on success, non-zero on failure. Output uses ❌ for er
 | `create-tag <tag> <commit>` | Create signed annotated tag via `POST /git/tags` + `POST /git/refs`. GitHub server-signs using the App identity. | `gate` |
 | `is-latest <tag>` | Print `true` if `<tag>` is the highest non-RC semver among local `v*` tags, else `false`. | `release.yml` `determine-latest` job |
 | `validate-pr` | End-to-end PR validator. Reads `BASE_SHA`, `HEAD_SHA`, `GH_TOKEN`, `REPO` from env. | `validate-release-request.yml` |
-| `gate` | End-to-end gate. Reads `BASE_SHA`, `MERGE_SHA`, `GH_TOKEN`, `REPO` from env. | `release-gate.yml` |
+| `gate` | End-to-end gate. Re-validates (filename, schema, commit-exists, tag-free, signatures) then creates tag. Reads `BASE_SHA`, `MERGE_SHA`, `GH_TOKEN`, `REPO` from env. | `release-gate.yml` |
 | `lint <path>` | Pre-commit sanity check on a single YAML. Same checks as CI minus the diff step. Reads `GH_TOKEN`, `REPO` from env. | local dev only |
 
 ### Local dry-run examples
@@ -173,8 +178,8 @@ uv run --with pyyaml python .github/workflows/release/release.py \
 
 ```
 .github/workflows/release/
-├── release.py          # The CLI (argparse, ~370 lines)
-├── test_release.py     # pytest suite (~540 lines, 61 tests)
+├── release.py          # The CLI (argparse, ~475 lines)
+├── test_release.py     # pytest suite (~600 lines, 65 tests)
 └── README.md           # This file
 ```
 

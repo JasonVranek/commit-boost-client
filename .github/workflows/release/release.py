@@ -354,7 +354,15 @@ def cmd_gate(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     filepath = added[0]
+    basename = Path(filepath).stem
+
+    # Re-validate everything — do not trust that validate-pr ran or passed.
+    _step(cmd_validate_filename, argparse.Namespace(basename=basename))
     commit, tag = validate_yaml_file(filepath)
+    _step(cmd_check_commit_exists, argparse.Namespace(sha=commit))
+    _step(cmd_check_tag_free, argparse.Namespace(tag=tag))
+    _step(cmd_check_signatures, argparse.Namespace(commit=commit))
+
     cmd_create_tag(argparse.Namespace(tag=tag, commit=commit))
 
 
