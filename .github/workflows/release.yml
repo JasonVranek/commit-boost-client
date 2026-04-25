@@ -10,6 +10,10 @@ permissions:
   packages: write
   id-token: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   check-ci-status:
     runs-on: ubuntu-latest
@@ -56,6 +60,7 @@ jobs:
     needs: [check-ci-status]
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         target:
           - amd64
@@ -108,11 +113,11 @@ jobs:
         with:
           context: .
           push: false
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.target }}
           cache-from: type=registry,ref=ghcr.io/${{ env.OWNER }}/buildcache:${{ matrix.target-crate}}
           cache-to: type=registry,ref=ghcr.io/${{ env.OWNER }}/buildcache:${{ matrix.target-crate }},mode=max
           file: provisioning/build.Dockerfile
-          outputs: type=local,dest=build
+          outputs: type=local,dest=build/linux_${{ matrix.target }}
           build-args: |
             TARGET_CRATE=${{ matrix.name }}
 
@@ -134,6 +139,7 @@ jobs:
     needs: [check-ci-status]
     timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         target:
           # x64 requires macos-latest-large which is not available in the free tier
@@ -169,19 +175,19 @@ jobs:
           brew install protobuf
 
       - name: Cache Cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache Cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache Cargo build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ matrix.target }}-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
@@ -286,7 +292,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: signed-${{ github.ref_name }}
-          path: ./artifacts/**/*
+          path: ./artifacts/**/*.sigstore*
 
   # Creates a draft release on GitHub with the binaries
   finalize-release:

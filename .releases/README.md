@@ -33,8 +33,8 @@ This directory contains release-request YAML files. Adding a new file here trigg
 
 ## What happens after merge
 
-1. `release-gate.yml` creates the signed tag at the referenced commit
-2. `release.yml` builds artifacts from the tagged commit and publishes the release
+1. `release-gate.yml` re-validates the request, then creates the signed tag at the referenced commit
+2. `release.yml` builds binaries, pushes Docker images, signs with Sigstore, and drafts the GitHub Release
 3. `:latest` on GHCR is updated only if the new tag is the highest non-RC semver
 
 ## Reviewer checklist

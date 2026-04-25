@@ -1,30 +1,41 @@
 """Tests for release.py — pure-logic and mocked-network coverage."""
 
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 import pytest
 
 from release import (
     SEMVER_RE,
     _semver_key,
-    cmd_validate_filename,
-    cmd_validate_yaml,
-    cmd_find_added,
-    cmd_check_modifications,
-    cmd_is_latest,
-    cmd_check_signatures,
+    cmd_check_ci,
     cmd_check_commit_exists,
+    cmd_check_modifications,
+    cmd_check_signatures,
     cmd_check_tag_free,
-    GhApiError,
+    cmd_create_tag,
+    cmd_find_added,
+    cmd_gate,
+    cmd_is_latest,
     cmd_lint,
+    cmd_validate_filename,
+    cmd_validate_pr,
+    cmd_validate_yaml,
+    GhApiError,
 )
 
 HERE = Path(__file__).parent
+
+
+@pytest.fixture(autouse=True)
+def _restore_cwd():
+    """Restore working directory after each test."""
+    orig = os.getcwd()
+    yield
+    os.chdir(orig)
 
 
 def _write_yaml(tmp_path: Path, name: str, content: str) -> str:
@@ -338,9 +349,9 @@ class TestCheckSignatures:
             mock_run.side_effect = subprocess.CalledProcessError(128, "git describe")
             with pytest.raises(SystemExit) as exc:
                 cmd_check_signatures(_ns(commit="abc123"))
-            assert exc.value.code == 0
+            assert exc.value.code == 1
             out = capsys.readouterr().out
-            assert "⚠️" in out
+            assert "❌" in out
 
     def test_gh_api_error(self, capsys):
         with (
@@ -360,6 +371,7 @@ class TestCheckSignatures:
 
 class TestFindAddedReleases:
     def test_finds_added_file(self, tmp_path):
+        os.chdir(str(tmp_path))
         _init_git_repo(tmp_path)
         _git_commit(tmp_path, "initial", files={"README.md": "hello"})
         base = _git_rev(tmp_path, "HEAD")
@@ -372,6 +384,7 @@ class TestFindAddedReleases:
         assert exc.value.code == 0
 
     def test_no_added_files(self, tmp_path, capsys):
+        os.chdir(str(tmp_path))
         _init_git_repo(tmp_path)
         _git_commit(tmp_path, "initial", files={"README.md": "hello"})
         base = _git_rev(tmp_path, "HEAD")
@@ -461,6 +474,83 @@ class TestCheckTagFree:
             assert exc.value.code == 1
 
 
+# ── check-ci ─────────────────────────────────────────────────────────────────
+
+class TestCheckCi:
+    def test_all_checks_pass(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {"check_runs": [
+                {"name": "ci", "status": "completed", "conclusion": "success"},
+                {"name": "lint", "status": "completed", "conclusion": "success"},
+            ]}
+            with pytest.raises(SystemExit) as exc:
+                cmd_check_ci(_ns(sha="abc123"))
+            assert exc.value.code == 0
+            assert "✅" in capsys.readouterr().out
+
+    def test_failure_detected(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {"check_runs": [
+                {"name": "ci", "status": "completed", "conclusion": "success"},
+                {"name": "lint", "status": "completed", "conclusion": "failure"},
+            ]}
+            with pytest.raises(SystemExit) as exc:
+                cmd_check_ci(_ns(sha="abc123"))
+            assert exc.value.code == 1
+            assert "lint" in capsys.readouterr().out
+
+    def test_no_completed_checks_fails(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {"check_runs": [
+                {"name": "ci", "status": "in_progress"},
+            ]}
+            with pytest.raises(SystemExit) as exc:
+                cmd_check_ci(_ns(sha="abc123"))
+            assert exc.value.code == 1
+
+    def test_skipped_not_treated_as_failure(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {"check_runs": [
+                {"name": "ci", "status": "completed", "conclusion": "success"},
+                {"name": "optional", "status": "completed", "conclusion": "skipped"},
+            ]}
+            with pytest.raises(SystemExit) as exc:
+                cmd_check_ci(_ns(sha="abc123"))
+            assert exc.value.code == 0
+
+    def test_neutral_not_treated_as_failure(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {"check_runs": [
+                {"name": "ci", "status": "completed", "conclusion": "success"},
+                {"name": "info", "status": "completed", "conclusion": "neutral"},
+            ]}
+            with pytest.raises(SystemExit) as exc:
+                cmd_check_ci(_ns(sha="abc123"))
+            assert exc.value.code == 0
+
+
+# ── create-tag ───────────────────────────────────────────────────────────────
+
+class TestCreateTag:
+    def test_creates_tag_successfully(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.side_effect = [
+                {"sha": "tag_obj_sha_123"},  # POST /git/tags
+                {},                           # POST /git/refs
+            ]
+            with pytest.raises(SystemExit) as exc:
+                cmd_create_tag(_ns(tag="v1.2.3", commit="abc123"))
+            assert exc.value.code == 0
+            assert "✅" in capsys.readouterr().out
+
+    def test_fails_when_tag_object_has_no_sha(self, capsys):
+        with patch("release.gh_api") as mock_gh:
+            mock_gh.return_value = {}  # no sha field
+            with pytest.raises(SystemExit) as exc:
+                cmd_create_tag(_ns(tag="v1.2.3", commit="abc123"))
+            assert exc.value.code == 1
+
+
 # ── _semver_key ──────────────────────────────────────────────────────────────
 
 class TestSemverKey:
@@ -503,21 +593,6 @@ def _ns(**kwargs):
     """Build a simple argparse.Namespace stand-in."""
     from types import SimpleNamespace
     return SimpleNamespace(**kwargs)
-
-
-def _cp(stdout: str = "", returncode: int = 0) -> str:
-    """Return value compatible with run_git (which returns stdout as str).
-
-    Kept as a helper so existing test call sites don't have to change.
-    Tests using `_cp(stdout=..., returncode=...)` now just get the stdout
-    string; return-code handling at this boundary is already covered by
-    CalledProcessError side_effect patterns elsewhere.
-    """
-    return stdout
-
-
-class ReleaseAPIError_DEPRECATED(Exception):
-    """Unused — kept as placeholder. Tests now use GhApiError from release."""
 
 
 # git helpers for tmp-dir based tests

@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths: ['.releases/**']
 
+concurrency:
+  group: release-gate
+  cancel-in-progress: false
+
 jobs:
   create-release-tag:
     name: Create tag from release request

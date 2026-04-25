@@ -30,7 +30,7 @@ class GhApiError(Exception):
     """Raised when a ``gh api`` call fails non-zero."""
 
 
-def gh_api(method: str, path: str, **fields) -> dict | list:
+def gh_api(method: str, path: str, *, paginate: bool = False, **fields) -> dict | list:
     """Thin wrapper over ``gh api``.  Returns parsed JSON."""
     token = _env("GH_TOKEN")
     repo = _env("REPO")
@@ -38,7 +38,7 @@ def gh_api(method: str, path: str, **fields) -> dict | list:
     argv = ["gh", "api", "--method", method, full_path]
     for k, v in fields.items():
         argv.extend(["-f", f"{k}={v}"])
-    if method.upper() == "GET":
+    if method.upper() == "GET" and paginate:
         argv.append("--paginate")
     env = os.environ.copy()
     env["GH_TOKEN"] = token
@@ -72,8 +72,10 @@ def _git_diff(base: str, head: str, diff_filter: str) -> list[str]:
             "diff", "--name-only", f"--diff-filter={diff_filter}",
             f"{base}..{head}", "--", ".releases/*.yml",
         )
-    except subprocess.CalledProcessError:
-        return []
+    except subprocess.CalledProcessError as e:
+        if e.returncode == 1:
+            return []
+        raise
     return [l for l in out.strip().split("\n") if l]
 
 
@@ -219,12 +221,13 @@ def cmd_check_signatures(args: argparse.Namespace) -> None:
     try:
         prev_tag = run_git("describe", "--tags", "--abbrev=0", f"{commit}^").strip()
     except subprocess.CalledProcessError:
-        print("⚠️  No prior tag ancestor found; skipping ancestor signature check")
-        sys.exit(0)
+        print("❌ No prior tag ancestor found. Cannot verify commit signatures.")
+        print("Ensure fetch-depth: 0 and tags are fetched.")
+        sys.exit(1)
 
     print(f"Comparing signatures from {prev_tag} (ancestor of {commit}) to {commit}...")
     try:
-        data = gh_api("GET", f"/compare/{prev_tag}...{commit}")
+        data = gh_api("GET", f"/compare/{prev_tag}...{commit}", paginate=True)
     except GhApiError:
         print("❌ Failed to compare revisions")
         sys.exit(1)
@@ -273,6 +276,10 @@ def cmd_is_latest(args: argparse.Namespace) -> None:
     if not SEMVER_RE.match(tag):
         print(f"❌ Tag {tag!r} is not strict semver. Cannot determine is-latest.")
         sys.exit(1)
+    # RC tags never get :latest
+    if "-rc" in tag:
+        print("false")
+        sys.exit(0)
     try:
         all_tags = run_git("tag", "--list", "v*").strip().split("\n")
     except subprocess.CalledProcessError:
@@ -361,7 +368,18 @@ def cmd_gate(args: argparse.Namespace) -> None:
     commit, tag = validate_yaml_file(filepath)
     _step(cmd_check_commit_exists, argparse.Namespace(sha=commit))
     _step(cmd_check_tag_free, argparse.Namespace(tag=tag))
+
+    # Verify the commit is reachable from the merge commit
+    try:
+        run_git("merge-base", "--is-ancestor", commit, merge_sha)
+        print(f"✅ Commit {commit[:12]} is an ancestor of the merge.")
+    except subprocess.CalledProcessError:
+        print(f"❌ Commit {commit} is not reachable from the merge commit {merge_sha}.")
+        print("The release commit must be an ancestor of the merged PR.")
+        sys.exit(1)
+
     _step(cmd_check_signatures, argparse.Namespace(commit=commit))
+    _step(cmd_check_ci, argparse.Namespace(sha=commit))
 
     cmd_create_tag(argparse.Namespace(tag=tag, commit=commit))
 
@@ -374,10 +392,11 @@ def cmd_check_ci(args: argparse.Namespace) -> None:
 
     completed = [r for r in runs if r.get("status") == "completed"]
     if not completed:
-        print(f"⚠️  No completed CI checks for commit {sha}. Proceeding without verification.")
-        sys.exit(0)
+        print(f"❌ No completed CI checks for commit {sha}. Cannot verify CI status.")
+        sys.exit(1)
 
-    failures = [(r["name"], r["conclusion"]) for r in completed if r.get("conclusion") != "success"]
+    FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+    failures = [(r["name"], r["conclusion"]) for r in completed if r.get("conclusion") in FAILURE_CONCLUSIONS]
     if failures:
         print(f"❌ CI check failed for commit {sha}:")
         for name, conclusion in failures:
