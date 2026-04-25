@@ -1,6 +1,7 @@
 name: Validate Release Request
 on:
   pull_request:
+    paths: ['.releases/**']
 
 jobs:
   validate:

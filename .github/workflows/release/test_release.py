@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+import release
+
 from release import (
     SEMVER_RE,
     _semver_key,
@@ -624,6 +626,208 @@ def _git_rev(path: Path, ref: str) -> str:
         cwd=str(path), capture_output=True, text=True,
     )
     return r.stdout.strip()
+
+
+# ── validate-pr (end-to-end in tmp git repo) ────────────────────────────────
+
+class TestValidatePr:
+    """End-to-end tests for cmd_validate_pr."""
+
+    def _setup_release_pr(self, tmp_path, tag="v1.2.3"):
+        """Create a tmp git repo with one added release YAML."""
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={"README.md": "hello"})
+        base = _git_rev(tmp_path, "HEAD")
+        _git_commit(tmp_path, "add release", files={
+            f".releases/{tag}.yml": f"commit: {'a' * 40}\nreason: test release\n"
+        })
+        head = _git_rev(tmp_path, "HEAD")
+        return base, head
+
+    def test_happy_path(self, tmp_path, monkeypatch, capsys):
+        """Single valid release YAML, all checks pass."""
+        os.chdir(str(tmp_path))
+        base, head = self._setup_release_pr(tmp_path)
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("HEAD_SHA", head)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+        # Capture original before patch to use in side_effect
+        original_run_git = release.run_git
+        with (
+            patch("release.gh_api") as mock_gh,
+            patch("release.run_git", wraps=original_run_git) as mock_git,
+        ):
+            def git_side_effect(*args):
+                # Let diff calls go through to real git
+                if args[0] == "diff":
+                    return original_run_git(*args)
+                # tag --list for check-no-regression (if it exists)
+                if args == ("tag", "--list", "v*"):
+                    return ""
+                # describe for check-signatures
+                if args[0] == "describe":
+                    return "v1.0.0"
+                return ""
+            mock_git.side_effect = git_side_effect
+
+            def gh_side_effect(method, path_, **kwargs):
+                if "/commits/" in path_ and method == "GET":
+                    return {"sha": "a" * 40}
+                if "/git/refs/tags/" in path_:
+                    raise GhApiError("not found")
+                if "/compare/" in path_:
+                    return {"commits": [
+                        {"sha": "a", "commit": {"verification": {"verified": True}}},
+                    ]}
+                raise AssertionError(f"unexpected gh_api: {method} {path_}")
+            mock_gh.side_effect = gh_side_effect
+
+            cmd_validate_pr(_ns())
+            out = capsys.readouterr().out
+            assert "added_count=1" in out
+            assert "tag=v1.2.3" in out
+
+    def test_no_release_files_passes_trivially(self, tmp_path, monkeypatch, capsys):
+        """PR with no .releases/ changes passes trivially."""
+        os.chdir(str(tmp_path))
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={"README.md": "hello"})
+        base = _git_rev(tmp_path, "HEAD")
+        _git_commit(tmp_path, "normal change", files={"src/main.rs": "fn main() {}"})
+        head = _git_rev(tmp_path, "HEAD")
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("HEAD_SHA", head)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate_pr(_ns())
+        assert exc.value.code == 0
+        assert "added_count=0" in capsys.readouterr().out
+
+    def test_multiple_release_files_rejected(self, tmp_path, monkeypatch, capsys):
+        """More than one release YAML in a single PR is rejected."""
+        os.chdir(str(tmp_path))
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={"README.md": "hello"})
+        base = _git_rev(tmp_path, "HEAD")
+        _git_commit(tmp_path, "add two releases", files={
+            ".releases/v1.0.0.yml": f"commit: {'a' * 40}\nreason: first\n",
+            ".releases/v1.0.1.yml": f"commit: {'b' * 40}\nreason: second\n",
+        })
+        head = _git_rev(tmp_path, "HEAD")
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("HEAD_SHA", head)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate_pr(_ns())
+        assert exc.value.code == 1
+        assert "Only one" in capsys.readouterr().out
+
+    def test_modification_rejected(self, tmp_path, monkeypatch, capsys):
+        """Modifying an existing release YAML is rejected."""
+        os.chdir(str(tmp_path))
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={
+            ".releases/v1.0.0.yml": f"commit: {'a' * 40}\nreason: original\n"
+        })
+        base = _git_rev(tmp_path, "HEAD")
+        _git_commit(tmp_path, "modify existing", files={
+            ".releases/v1.0.0.yml": f"commit: {'b' * 40}\nreason: modified\n"
+        })
+        head = _git_rev(tmp_path, "HEAD")
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("HEAD_SHA", head)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+        with pytest.raises(SystemExit) as exc:
+            cmd_validate_pr(_ns())
+        assert exc.value.code == 1
+        assert "cannot be modified" in capsys.readouterr().out
+
+
+# ── gate (end-to-end in tmp git repo) ───────────────────────────────────────
+
+class TestGate:
+    """End-to-end tests for cmd_gate."""
+
+    def test_happy_path(self, tmp_path, monkeypatch, capsys):
+        """Valid release YAML, all checks pass, tag created."""
+        os.chdir(str(tmp_path))
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={"README.md": "hello"})
+        base = _git_rev(tmp_path, "HEAD")
+        commit_sha = "a" * 40
+        _git_commit(tmp_path, "add release", files={
+            ".releases/v1.2.3.yml": f"commit: {commit_sha}\nreason: test\n"
+        })
+        merge_sha = _git_rev(tmp_path, "HEAD")
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("MERGE_SHA", merge_sha)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+
+        original_run_git = release.run_git
+        with (
+            patch("release.gh_api") as mock_gh,
+            patch("release.run_git", wraps=original_run_git) as mock_git,
+        ):
+            def git_side_effect(*args):
+                if args[0] == "diff":
+                    return original_run_git(*args)
+                if args[0] == "describe":
+                    return "v1.0.0"
+                if args[0] == "merge-base":
+                    # Simulate ancestry check passing
+                    return ""
+                if args == ("tag", "--list", "v*"):
+                    return ""
+                return ""
+            mock_git.side_effect = git_side_effect
+
+            def gh_side_effect(method, path_, **kwargs):
+                if "/commits/" in path_ and method == "GET":
+                    if "check-runs" in path_:
+                        return {"check_runs": [
+                            {"name": "ci", "status": "completed", "conclusion": "success"},
+                        ]}
+                    return {"sha": commit_sha}
+                if "/git/refs/tags/" in path_ and method == "GET":
+                    raise GhApiError("not found")
+                if "/compare/" in path_:
+                    return {"commits": [
+                        {"sha": "a", "commit": {"verification": {"verified": True}}},
+                    ]}
+                if "/git/tags" in path_ and method == "POST":
+                    return {"sha": "tag_obj_sha"}
+                if "/git/refs" in path_ and method == "POST":
+                    return {}
+                raise AssertionError(f"unexpected: {method} {path_}")
+            mock_gh.side_effect = gh_side_effect
+
+            with pytest.raises(SystemExit) as exc:
+                cmd_gate(_ns())
+            assert exc.value.code == 0
+            out = capsys.readouterr().out
+            assert "Tag v1.2.3 created" in out
+
+    def test_no_release_files_skips(self, tmp_path, monkeypatch, capsys):
+        """No release YAML added — gate skips gracefully."""
+        os.chdir(str(tmp_path))
+        _init_git_repo(tmp_path)
+        _git_commit(tmp_path, "initial", files={"README.md": "hello"})
+        base = _git_rev(tmp_path, "HEAD")
+        _git_commit(tmp_path, "normal change", files={"src/main.rs": "fn main() {}"})
+        merge_sha = _git_rev(tmp_path, "HEAD")
+        monkeypatch.setenv("BASE_SHA", base)
+        monkeypatch.setenv("MERGE_SHA", merge_sha)
+        monkeypatch.setenv("GH_TOKEN", "fake")
+        monkeypatch.setenv("REPO", "test/repo")
+        with pytest.raises(SystemExit) as exc:
+            cmd_gate(_ns())
+        assert exc.value.code == 0
+        assert "Skipping" in capsys.readouterr().out
 
 
 # ── lint ─────────────────────────────────────────────────────────────────────
