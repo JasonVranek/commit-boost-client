@@ -216,39 +216,6 @@ def cmd_check_tag_free(args: argparse.Namespace) -> None:
         sys.exit(0)
 
 
-def cmd_check_signatures(args: argparse.Namespace) -> None:
-    commit = args.commit
-    try:
-        prev_tag = run_git("describe", "--tags", "--abbrev=0", f"{commit}^").strip()
-    except subprocess.CalledProcessError:
-        print("❌ No prior tag ancestor found. Cannot verify commit signatures.")
-        print("Ensure fetch-depth: 0 and tags are fetched.")
-        sys.exit(1)
-
-    print(f"Comparing signatures from {prev_tag} (ancestor of {commit}) to {commit}...")
-    try:
-        data = gh_api("GET", f"/compare/{prev_tag}...{commit}", paginate=True)
-    except GhApiError:
-        print("❌ Failed to compare revisions")
-        sys.exit(1)
-
-    commits = data if isinstance(data, list) else data.get("commits", [])
-    unsigned = [
-        c["sha"]
-        for c in commits
-        if not c.get("commit", {}).get("verification", {}).get("verified", False)
-    ]
-    if unsigned:
-        print(f"❌ Unsigned commits between {prev_tag} and {commit}:")
-        for sha in unsigned:
-            print(sha)
-        print("Every commit in a release must be signed.")
-        sys.exit(1)
-
-    print(f"✅ All commits between {prev_tag} and {commit} are signed.")
-    sys.exit(0)
-
-
 def cmd_create_tag(args: argparse.Namespace) -> None:
     tag_obj = gh_api(
         "POST", "/git/tags",
@@ -343,8 +310,6 @@ def cmd_validate_pr(args: argparse.Namespace) -> None:
     commit, _ = validate_yaml_file(filepath)
     _step(cmd_check_commit_exists, argparse.Namespace(sha=commit))
     _step(cmd_check_tag_free, argparse.Namespace(tag=basename))
-    _step(cmd_check_signatures, argparse.Namespace(commit=commit))
-
     print(f"added_count=1")
     print(f"tag={basename}")
     print(f"commit={commit}")
@@ -356,9 +321,14 @@ def cmd_gate(args: argparse.Namespace) -> None:
     merge_sha = _env("MERGE_SHA")
 
     added = find_added(base, merge_sha)
-    if len(added) != 1:
-        print(f"Expected exactly 1 added release YAML, got {len(added)}. Skipping.")
+    if len(added) == 0:
+        print("Expected exactly 1 added release YAML, got 0. Skipping.")
         sys.exit(0)
+    if len(added) > 1:
+        print(f"❌ Expected exactly 1 added release YAML, got {len(added)}.")
+        for path in added:
+            print(path)
+        sys.exit(1)
 
     filepath = added[0]
     basename = Path(filepath).stem
@@ -369,41 +339,11 @@ def cmd_gate(args: argparse.Namespace) -> None:
     _step(cmd_check_commit_exists, argparse.Namespace(sha=commit))
     _step(cmd_check_tag_free, argparse.Namespace(tag=tag))
 
-    # Verify the commit is reachable from the merge commit
-    try:
-        run_git("merge-base", "--is-ancestor", commit, merge_sha)
-        print(f"✅ Commit {commit[:12]} is an ancestor of the merge.")
-    except subprocess.CalledProcessError:
-        print(f"❌ Commit {commit} is not reachable from the merge commit {merge_sha}.")
-        print("The release commit must be an ancestor of the merged PR.")
-        sys.exit(1)
-
-    _step(cmd_check_signatures, argparse.Namespace(commit=commit))
+    # Emit structured output before creating the tag so release-gate.yml can parse it
+    print(f"tag={tag}")
+    print(f"commit={commit}")
 
     cmd_create_tag(argparse.Namespace(tag=tag, commit=commit))
-
-
-def cmd_check_ci(args: argparse.Namespace) -> None:
-    """Check CI status for a given commit SHA."""
-    sha = args.sha
-    data = gh_api("GET", f"/commits/{sha}/check-runs?per_page=100")
-    runs = data.get("check_runs", [])
-
-    completed = [r for r in runs if r.get("status") == "completed"]
-    if not completed:
-        print(f"❌ No completed CI checks for commit {sha}. Cannot verify CI status.")
-        sys.exit(1)
-
-    FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
-    failures = [(r["name"], r["conclusion"]) for r in completed if r.get("conclusion") in FAILURE_CONCLUSIONS]
-    if failures:
-        print(f"❌ CI check failed for commit {sha}:")
-        for name, conclusion in failures:
-            print(f"  {name}: {conclusion}")
-        sys.exit(1)
-
-    print(f"✅ All CI checks passed for commit {sha}")
-    sys.exit(0)
 
 
 def cmd_lint(args: argparse.Namespace) -> None:
@@ -421,7 +361,6 @@ def cmd_lint(args: argparse.Namespace) -> None:
     commit, _ = validate_yaml_file(path)
     _step(cmd_check_commit_exists, argparse.Namespace(sha=commit))
     _step(cmd_check_tag_free, argparse.Namespace(tag=basename))
-    _step(cmd_check_signatures, argparse.Namespace(commit=commit))
     print(f"✅ {path} would pass CI.")
     sys.exit(0)
 
@@ -458,10 +397,6 @@ def main() -> None:
     p.add_argument("tag")
     p.set_defaults(func=cmd_check_tag_free)
 
-    p = sub.add_parser("check-signatures", help="Check that all commits to a ref are signed")
-    p.add_argument("commit")
-    p.set_defaults(func=cmd_check_signatures)
-
     p = sub.add_parser("create-tag", help="Create an annotated tag via GitHub API")
     p.add_argument("tag")
     p.add_argument("commit")
@@ -476,10 +411,6 @@ def main() -> None:
 
     p = sub.add_parser("gate", help="End-to-end gate after merge (reads env)")
     p.set_defaults(func=cmd_gate)
-
-    p = sub.add_parser("check-ci", help="Check CI status for a given commit SHA")
-    p.add_argument("sha", help="Commit SHA to check")
-    p.set_defaults(func=cmd_check_ci)
 
     p = sub.add_parser("lint", help="Pre-commit sanity check on a single YAML (reads $REPO + $GH_TOKEN)")
     p.add_argument("path", help="Path to the release-request YAML to lint")

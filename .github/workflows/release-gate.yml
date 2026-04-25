@@ -53,13 +53,17 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          python .github/workflows/release/release.py gate
-          # Extract tag and commit from the added release YAML
-          RELEASE_FILE=$(git diff --name-only --diff-filter=A ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.merge_commit_sha }} -- '.releases/*.yml')
-          TAG=$(basename "$RELEASE_FILE" .yml)
-          COMMIT=$(python -c "import yaml; print(yaml.safe_load(open('$RELEASE_FILE'))['commit'])")
+          python .github/workflows/release/release.py gate | tee /tmp/gate-output.txt
+          TAG=$(grep '^tag=' /tmp/gate-output.txt | tail -1 | cut -d= -f2-)
+          COMMIT=$(grep '^commit=' /tmp/gate-output.txt | tail -1 | cut -d= -f2-)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+
+          if [ -z "$TAG" ] || [ -z "$COMMIT" ]; then
+            echo "❌ gate did not emit tag= / commit= outputs"
+            exit 1
+          fi
+          echo "Gate outputs: $TAG @ $COMMIT"
 
       - name: Dispatch release workflow
         env:
@@ -67,5 +71,4 @@ jobs:
         run: |
           gh workflow run release.yml \
             --ref main \
-            -f tag=${{ steps.gate.outputs.tag }} \
-            -f commit=${{ steps.gate.outputs.commit }}
+            -f tag=${{ steps.gate.outputs.tag }}

@@ -7,21 +7,53 @@ on:
         description: 'Release tag (e.g. v1.2.3)'
         required: true
         type: string
-      commit:
-        description: 'Commit SHA to build from'
-        required: true
-        type: string
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
+  packages: read
+  id-token: none
+  actions: read
+  attestations: read
+  checks: read
+  deployments: read
+  issues: read
+  discussions: read
+  pull-requests: read
+  repository-projects: read
+  security-events: read
+  statuses: read
+  models: read
+
+# Job-level permissions grant write scopes only where required.
 
 concurrency:
   group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
+  resolve-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve tag to commit
+        id: resolve
+        run: |
+          git cat-file -e "refs/tags/${{ inputs.tag }}" 2>/dev/null || {
+            echo "❌ Tag ${{ inputs.tag }} does not exist"
+            exit 1
+          }
+          COMMIT=$(git rev-parse "refs/tags/${{ inputs.tag }}^{}")
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "Resolved tag ${{ inputs.tag }} to commit $COMMIT"
+
   # Determines whether this tag should update :latest on GHCR.
   # Runs once; the Docker job consumes its output via matrix.
   determine-latest:
@@ -42,6 +74,7 @@ jobs:
 
   # Builds the x64 and arm64 binaries for Linux, for all 3 crates, via the Docker builder
   build-binaries-linux:
+    needs: [resolve-tag]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -69,7 +102,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ needs.resolve-tag.outputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -121,6 +154,7 @@ jobs:
 
   # Builds the arm64 binaries for Darwin, for all 3 crates, natively
   build-binaries-darwin:
+    needs: [resolve-tag]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -145,7 +179,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ needs.resolve-tag.outputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -199,7 +233,10 @@ jobs:
 
   # Builds and pushes Docker images for both PBS and Signer
   build-and-push-docker:
-    needs: [build-binaries-linux, determine-latest]
+    needs: [resolve-tag, build-binaries-linux, determine-latest]
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         crate: [pbs, signer]
@@ -209,7 +246,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ needs.resolve-tag.outputs.commit }}
           fetch-depth: 0
           submodules: true
 
@@ -260,6 +297,9 @@ jobs:
   # Signs all binaries with Sigstore for provenance
   sign-binaries:
     needs: [build-binaries-linux, build-binaries-darwin]
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -287,6 +327,9 @@ jobs:
       - build-binaries-darwin
       - build-and-push-docker
       - sign-binaries
+    permissions:
+      contents: write
+      packages: read
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
