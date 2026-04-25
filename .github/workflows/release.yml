@@ -299,13 +299,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Download artifacts (binaries + signed bundles)
+      - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-          pattern: |
-            commit-boost-*
-            signed-*
+          pattern: "commit-boost-*"
+
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: "signed-*"
 
       - name: Finalize Release
         uses: softprops/action-gh-release@v2
