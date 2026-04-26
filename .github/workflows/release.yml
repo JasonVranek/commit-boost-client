@@ -132,8 +132,6 @@ jobs:
           context: .
           push: false
           platforms: linux/${{ matrix.target }}
-          cache-from: type=registry,ref=ghcr.io/${{ env.OWNER }}/buildcache:${{ matrix.target-crate}}
-          cache-to: type=registry,ref=ghcr.io/${{ env.OWNER }}/buildcache:${{ matrix.target-crate }},mode=max
           file: provisioning/build.Dockerfile
           outputs: type=local,dest=build/linux_${{ matrix.target }}
           build-args: |
