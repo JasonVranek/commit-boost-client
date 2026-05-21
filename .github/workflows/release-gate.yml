@@ -108,6 +108,16 @@ jobs:
             -f sha="dbefde71d7a145c8ed596f5125f091599f547029" \
             && echo "✅ Direct ref created" \
             || echo "❌ FAILED to create direct ref"
+      - name: Try creating a branch ref (not tag ref)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        continue-on-error: true
+        run: |
+          gh api -X POST "/repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/heads/debug-branch-$(date +%s)" \
+            -f sha="dbefde71d7a145c8ed596f5125f091599f547029" \
+            && echo "✅ Branch ref created" \
+            || echo "❌ FAILED to create branch ref"
 
       - name: Create tag from release request
         id: gate
