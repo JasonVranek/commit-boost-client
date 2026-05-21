@@ -45,6 +45,70 @@ jobs:
       - name: Install Python deps
         run: pip install pyyaml
 
+      - name: Debug App token permissions
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        continue-on-error: true
+        run: |
+          echo "================================================"
+          echo "1. Token's installation context"
+          echo "================================================"
+          gh api /installation/repositories --jq '.repositories[].full_name' \
+            && echo "✅ Installation lists repos" \
+            || echo "❌ FAILED to list installation repos"
+
+          echo ""
+          echo "================================================"
+          echo "2. Read access to repo refs"
+          echo "================================================"
+          gh api "/repos/${{ github.repository }}/git/refs/heads/main" --jq '.object.sha' \
+            && echo "✅ Can read refs" \
+            || echo "❌ FAILED to read refs"
+
+          echo ""
+          echo "================================================"
+          echo "3. Create a tag object (POST /git/tags)"
+          echo "================================================"
+          TAG_OBJ=$(gh api -X POST "/repos/${{ github.repository }}/git/tags" \
+            -f tag="debug-tag-$(date +%s)" \
+            -f message="debug test" \
+            -f object="dbefde71d7a145c8ed596f5125f091599f547029" \
+            -f type=commit 2>&1) && echo "✅ Tag object created" || echo "❌ FAILED to create tag object: $TAG_OBJ"
+          echo "$TAG_OBJ"
+
+          echo ""
+          echo "================================================"
+          echo "4. Extract SHA from tag object response"
+          echo "================================================"
+          TAG_SHA=$(echo "$TAG_OBJ" | jq -r '.sha // empty')
+          echo "Tag SHA: $TAG_SHA"
+
+          if [ -n "$TAG_SHA" ]; then
+            echo ""
+            echo "================================================"
+            echo "5. Create ref pointing at the tag (POST /git/refs)"
+            echo "================================================"
+            REF_NAME="debug-ref-$(date +%s)"
+            gh api -X POST "/repos/${{ github.repository }}/git/refs" \
+              -f ref="refs/tags/$REF_NAME" \
+              -f sha="$TAG_SHA" \
+              && echo "✅ Ref created" \
+              || echo "❌ FAILED to create ref"
+          else
+            echo ""
+            echo "Skipping ref creation - no tag SHA available"
+          fi
+
+          echo ""
+          echo "================================================"
+          echo "6. Try creating a ref pointing directly at commit (no tag object)"
+          echo "================================================"
+          gh api -X POST "/repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/debug-direct-$(date +%s)" \
+            -f sha="dbefde71d7a145c8ed596f5125f091599f547029" \
+            && echo "✅ Direct ref created" \
+            || echo "❌ FAILED to create direct ref"
+
       - name: Create tag from release request
         id: gate
         env:
