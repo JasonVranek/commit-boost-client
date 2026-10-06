@@ -79,6 +79,7 @@ Each `[[relays]]` entry supports, besides `id` and `url`:
 - `enable_timing_games`: whether to enable timing games for this relay, as tuned by `target_first_request_ms` and `frequency_get_header_ms`. If neither of those is set, this flag has no effect. Advanced users only: misconfiguration can result in e.g. fetching a lower header value or missing a slot (caveats and worked examples in the annotated config example). Default: `false`.
 - `target_first_request_ms`: target time in the slot, in milliseconds, at which to send the first `get_header` request.
 - `frequency_get_header_ms`: frequency, in milliseconds, at which to send `get_header` requests.
+- `expected_auth_data`: (unreleased, from v0.12.0-rc1) hex bytes. On [ePBS](./epbs.md#routing-by-auth-data) requests the relay matches only auth data equal to these bytes, instead of its hostname.
 
 The same fields are available on `[[mux.relays]]` entries (see [Mux key loaders](./mux-key-loaders.md)).
 

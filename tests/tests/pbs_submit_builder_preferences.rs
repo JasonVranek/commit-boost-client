@@ -1,0 +1,257 @@
+use cb_common::{
+    pbs::{BuilderPreferences, BuilderPreferencesRequest, SignedBuilderRequestAuth},
+    signer::random_secret,
+    types::Chain,
+    utils::utcnow_ms,
+    wire::{CONSENSUS_VERSION_HEADER, EncodingType},
+};
+use cb_tests::{
+    mock_relay::MockRelayState,
+    utils::{
+        TEST_AUTH_DATA, generate_mock_relay, generate_mock_relay_url_only, opaque_auth,
+        setup_relay, setup_relays_with_auth_data,
+    },
+};
+use eyre::Result;
+use reqwest::{StatusCode, header::CONTENT_TYPE};
+
+const TEST_MAX_EXECUTION_PAYMENT: u64 = 1_000_000_000;
+
+/// CB does not gate preferences on slot age (see the past-slot test), so a
+/// fixed slot serves.
+const TEST_SLOT: u64 = 100;
+
+/// A slot that has already ended. Saturating: a chain whose genesis is under 10
+/// slots old would otherwise underflow rather than yield slot 0.
+fn past_slot(chain: Chain) -> u64 {
+    let now_sec = utcnow_ms() / 1_000;
+    ((now_sec.saturating_sub(chain.genesis_time_sec())) / chain.slot_time_sec()).saturating_sub(10)
+}
+
+fn preferences(
+    auth: SignedBuilderRequestAuth,
+    max_execution_payment: u64,
+) -> BuilderPreferencesRequest {
+    BuilderPreferencesRequest { auth, preferences: BuilderPreferences { max_execution_payment } }
+}
+
+/// The happy path: an SSZ submission reaches the builder as a 202, with the
+/// preferences and the auth forwarded unchanged.
+#[tokio::test]
+async fn test_submit_builder_preferences() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) = setup_relay(chain, |_| {}, generate_mock_relay).await?;
+
+    let auth = opaque_auth(TEST_AUTH_DATA, TEST_SLOT);
+    let request = preferences(auth.clone(), TEST_MAX_EXECUTION_PAYMENT);
+    let res =
+        mock_validator.do_submit_builder_preferences(None, &request, EncodingType::Ssz).await?;
+
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    assert_eq!(mock_state.received_builder_preferences(), 1);
+    assert_eq!(mock_state.received_max_execution_payment(), Some(TEST_MAX_EXECUTION_PAYMENT));
+
+    // The builder verifies what the proposer signed, so the auth must survive
+    // the hop byte for byte
+    let forwarded = mock_state.received_preferences_auth().expect("auth forwarded");
+    assert_eq!(forwarded.message.data.to_vec(), TEST_AUTH_DATA.to_vec());
+    assert_eq!(forwarded.message.slot, auth.message.slot);
+    assert_eq!(forwarded.signature, auth.signature);
+
+    // A builder files preferences per proposer, so the wrong path segment would
+    // store them against the wrong validator
+    assert_eq!(
+        mock_state.received_preferences_pubkey(),
+        Some(mock_validator.comm_boost.pubkey().clone()),
+        "preferences must be filed under the proposer from the request path"
+    );
+    Ok(())
+}
+
+/// The JSON wire form is the spec's, not merely whatever our own Serialize
+/// produces: Gwei and slot are quoted strings and `data` is hex. Built from a
+/// literal so that dropping the serde attributes fails here instead of
+/// round-tripping through the same impl the assertion uses. Quotes on the Gwei
+/// are optional on decode by ecosystem convention, so the unquoted number is
+/// accepted too.
+#[tokio::test]
+async fn test_submit_builder_preferences_json_wire_form() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) = setup_relay(chain, |_| {}, generate_mock_relay).await?;
+    let slot = TEST_SLOT;
+    let url = mock_validator
+        .comm_boost
+        .submit_builder_preferences_url(&mock_validator.comm_boost.pubkey().clone())?;
+
+    for max_execution_payment in [
+        serde_json::json!(TEST_MAX_EXECUTION_PAYMENT.to_string()),
+        serde_json::json!(TEST_MAX_EXECUTION_PAYMENT),
+    ] {
+        let body = serde_json::json!({
+            "preferences": { "max_execution_payment": max_execution_payment },
+            "auth": {
+                "message": { "data": "0xdead", "slot": slot.to_string() },
+                "signature": format!("0x{}", "0".repeat(192)),
+            }
+        });
+        let res = mock_validator
+            .comm_boost
+            .client
+            .post(url.clone())
+            .header(CONTENT_TYPE, EncodingType::Json.content_type_header().clone())
+            .header(CONSENSUS_VERSION_HEADER, "gloas")
+            .body(serde_json::to_vec(&body)?)
+            .send()
+            .await?;
+
+        assert_eq!(res.status(), StatusCode::ACCEPTED, "{body}");
+        assert_eq!(mock_state.received_max_execution_payment(), Some(TEST_MAX_EXECUTION_PAYMENT));
+        let forwarded = mock_state.received_preferences_auth().expect("auth forwarded");
+        assert_eq!(forwarded.message.data.to_vec(), TEST_AUTH_DATA.to_vec());
+        assert_eq!(forwarded.message.slot.as_u64(), slot);
+    }
+    Ok(())
+}
+
+/// Requests refused before any builder is asked, with an ErrorMessage body:
+/// `Eth-Consensus-Version` is required for JSON and SSZ alike (builder-specs
+/// #165), and an unsupported media type is a 415, distinct from the 400 of a
+/// malformed body. The per-rule detail (both encodings, the JSON default, an
+/// empty body) is pinned once in the wire.rs decoder test.
+#[tokio::test]
+async fn test_submit_builder_preferences_rejected_before_builders() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) = setup_relay(chain, |_| {}, generate_mock_relay).await?;
+    let request = preferences(opaque_auth(TEST_AUTH_DATA, TEST_SLOT), TEST_MAX_EXECUTION_PAYMENT);
+    let url = mock_validator
+        .comm_boost
+        .submit_builder_preferences_url(&mock_validator.comm_boost.pubkey().clone())?;
+
+    // (Content-Type, Eth-Consensus-Version, body, expected status, message excerpt)
+    let cases = [
+        (
+            "application/json",
+            None,
+            serde_json::to_vec(&request)?,
+            StatusCode::BAD_REQUEST,
+            "missing consensus version",
+        ),
+        ("text/plain", Some("gloas"), b"nonsense".to_vec(), StatusCode::UNSUPPORTED_MEDIA_TYPE, ""),
+    ];
+    for (content_type, version, body, status, message) in cases {
+        let mut req =
+            mock_validator.comm_boost.client.post(url.clone()).header(CONTENT_TYPE, content_type);
+        if let Some(version) = version {
+            req = req.header(CONSENSUS_VERSION_HEADER, version);
+        }
+        let res = req.body(body).send().await?;
+        assert_eq!(res.status(), status, "{content_type}");
+        let json: serde_json::Value = serde_json::from_slice(&res.bytes().await?)?;
+        assert_eq!(json["code"], status.as_u16(), "{json}");
+        assert!(json["message"].as_str().unwrap_or_default().contains(message), "{json}");
+    }
+    assert_eq!(mock_state.received_builder_preferences(), 0, "rejected before any builder");
+    Ok(())
+}
+
+/// CB does not gate preferences on slot age: freshness (rejecting a stale or
+/// replayed submission) is the builder's call, not the relay's, so CB forwards
+/// regardless. A preference naming a slot that has already ended still reaches
+/// the builder and is accepted.
+#[tokio::test]
+async fn test_submit_builder_preferences_past_slot_forwarded() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) = setup_relay(chain, |_| {}, generate_mock_relay).await?;
+
+    let request =
+        preferences(opaque_auth(TEST_AUTH_DATA, past_slot(chain)), TEST_MAX_EXECUTION_PAYMENT);
+    let res =
+        mock_validator.do_submit_builder_preferences(None, &request, EncodingType::Ssz).await?;
+
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    assert_eq!(mock_state.received_builder_preferences(), 1, "past-slot preference is forwarded");
+    Ok(())
+}
+
+/// Opaque data matching no relay is a 400 with the builder's data-mismatch
+/// message even when a relay declares no `expected_auth_data`: unmatched means
+/// CB has no builder to proxy to, and proposer-private preferences must never
+/// broadcast to builders the proposer did not address.
+#[tokio::test]
+async fn test_submit_builder_preferences_unmatched_opaque_auth_400() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) =
+        setup_relay(chain, |_| {}, generate_mock_relay_url_only).await?;
+
+    let request = preferences(opaque_auth(&[0xbe, 0xef], TEST_SLOT), TEST_MAX_EXECUTION_PAYMENT);
+    let res =
+        mock_validator.do_submit_builder_preferences(None, &request, EncodingType::Ssz).await?;
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(mock_state.received_builder_preferences(), 0, "no relay receives anything");
+    let body: serde_json::Value = serde_json::from_slice(&res.bytes().await?)?;
+    assert_eq!(body["code"], 400);
+    assert_eq!(
+        body["message"],
+        "Invalid SignedBuilderRequestAuth: auth.message.data does not match the value agreed with this builder"
+    );
+    Ok(())
+}
+
+/// The addressed builder's answer: only 202 is an acceptance. Its 400 and
+/// 401 propagate, so the proposer can see the spec's rejection and
+/// authentication failure, with a CB-written message rather than the
+/// builder's untrusted body. Any other status, another 2xx included, is the
+/// blanket 500; the 503 row is not itself a 500, so passthrough would show.
+#[tokio::test]
+async fn test_submit_builder_preferences_builder_status() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let (mock_validator, mock_state) = setup_relay(chain, |_| {}, generate_mock_relay).await?;
+    let request = preferences(opaque_auth(TEST_AUTH_DATA, TEST_SLOT), TEST_MAX_EXECUTION_PAYMENT);
+
+    // (builder's answer, CB's answer)
+    let cases = [
+        (StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR),
+        (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST),
+        (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED),
+        (StatusCode::SERVICE_UNAVAILABLE, StatusCode::INTERNAL_SERVER_ERROR),
+    ];
+    for (builder, expected) in cases {
+        mock_state.set_response_override(builder);
+        let res =
+            mock_validator.do_submit_builder_preferences(None, &request, EncodingType::Ssz).await?;
+        assert_eq!(res.status(), expected, "builder answered {builder}");
+        let body: serde_json::Value = serde_json::from_slice(&res.bytes().await?)?;
+        assert_eq!(body["code"], expected.as_u16(), "{body}");
+        if builder == StatusCode::BAD_REQUEST {
+            assert_eq!(
+                body["message"],
+                "The addressed builder rejected the submission with status 400"
+            );
+        }
+    }
+    assert_eq!(mock_state.received_builder_preferences(), 4, "the builder is asked every time");
+    Ok(())
+}
+
+/// Two relays with distinct auth data: preferences addressing one must reach
+/// only that builder, the other's received counter stays 0.
+#[tokio::test]
+async fn test_submit_builder_preferences_two_relays_addressed_one_only() -> Result<()> {
+    let chain = Chain::Hoodi;
+    let other_auth_data: &[u8] = &[0xbe, 0xef];
+    let (mock_validator, states) = setup_relays_with_auth_data(chain, vec![
+        (MockRelayState::new(chain, random_secret()), TEST_AUTH_DATA),
+        (MockRelayState::new(chain, random_secret()), other_auth_data),
+    ])
+    .await?;
+
+    let request = preferences(opaque_auth(TEST_AUTH_DATA, TEST_SLOT), TEST_MAX_EXECUTION_PAYMENT);
+    let res =
+        mock_validator.do_submit_builder_preferences(None, &request, EncodingType::Ssz).await?;
+
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+    assert_eq!(states[0].received_builder_preferences(), 1, "the addressed builder is asked");
+    assert_eq!(states[1].received_builder_preferences(), 0, "the unaddressed builder is not");
+    Ok(())
+}

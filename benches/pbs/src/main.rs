@@ -162,6 +162,7 @@ fn get_mock_validator(bench: BenchConfig) -> RelayClient {
         target_first_request_ms: None,
         frequency_get_header_ms: None,
         validator_registration_batch_size: None,
+        expected_auth_data: None,
     };
 
     RelayClient::new(config).unwrap()

@@ -12,6 +12,7 @@ use super::{
     HEADER_VERSION_KEY, HEADER_VERSION_VALUE,
     constants::{
         GET_HEADER_STREAM_PATH, GET_STATUS_PATH, REGISTER_VALIDATOR_PATH, SUBMIT_BLOCK_PATH,
+        SUBMIT_SIGNED_BEACON_BLOCK_PATH,
     },
     error::PbsError,
 };
@@ -219,6 +220,60 @@ impl RelayClient {
     pub fn submit_block_url(&self, api_version: BuilderApiVersion) -> Result<Url, PbsError> {
         self.builder_api_url(SUBMIT_BLOCK_PATH, api_version)
     }
+
+    /// builder-API: POST /eth/v1/builder/execution_payload_bid/{slot}/
+    /// {parent_hash}/{parent_root}/{proposer_pubkey}
+    pub fn get_execution_payload_bid_url(
+        &self,
+        slot: u64,
+        parent_hash: &B256,
+        parent_root: &B256,
+        validator_pubkey: &BlsPublicKey,
+    ) -> Result<Url, PbsError> {
+        self.builder_api_url(
+            &format!(
+                "/execution_payload_bid/{slot}/{parent_hash}/{parent_root}/{validator_pubkey}"
+            ),
+            BuilderApiVersion::V1,
+        )
+    }
+
+    /// builder-API: POST /eth/v1/builder/builder_preferences/{proposer_pubkey}
+    pub fn submit_builder_preferences_url(
+        &self,
+        validator_pubkey: &BlsPublicKey,
+    ) -> Result<Url, PbsError> {
+        self.builder_api_url(
+            &format!("/builder_preferences/{validator_pubkey}"),
+            BuilderApiVersion::V1,
+        )
+    }
+
+    /// builder-API: POST /eth/v1/builder/beacon_blocks
+    pub fn submit_signed_beacon_block_url(&self) -> Result<Url, PbsError> {
+        self.builder_api_url(SUBMIT_SIGNED_BEACON_BLOCK_PATH, BuilderApiVersion::V1)
+    }
+}
+
+/// builder-specs gloas `get_default_auth_data`: the auth data a validator uses
+/// for a builder when none was agreed out of band, the hostname of its URL.
+/// None for a URL without a host.
+pub fn get_default_auth_data(url: &Url) -> Option<Vec<u8>> {
+    // `host_str` is ASCII (punycode) and writes an IPv6 literal bracketed in
+    // RFC 5952 form with hexadecimal groups only, as the spec requires; std's
+    // `Ipv6Addr` Display would print `::ffff:192.0.2.1` in mixed notation
+    url.host_str().map(|host| host.to_ascii_lowercase().into_bytes())
+}
+
+/// Whether `auth.message.data` addresses this relay. A relay with
+/// `expected_auth_data` matches only those bytes, the form for a value agreed
+/// out of band. Any other relay matches its default auth data (see
+/// [`get_default_auth_data`]).
+pub fn relay_matches_auth_data(relay: &RelayConfig, data: &[u8]) -> bool {
+    if let Some(expected) = &relay.expected_auth_data {
+        return data == expected.as_ref();
+    }
+    get_default_auth_data(&relay.entry.url).is_some_and(|default| default == data)
 }
 
 /// First 4 bytes of the value's SHA-256: enough to see a rotation
@@ -233,12 +288,44 @@ mod tests {
     use std::collections::HashMap;
 
     use alloy::primitives::B256;
+    use url::Url;
 
-    use super::{GetHeaderRequest, RelayClient, RelayEntry, value_fingerprint};
+    use super::{
+        GetHeaderRequest, RelayClient, RelayEntry, get_default_auth_data, value_fingerprint,
+    };
     use crate::{
         config::{GetHeaderTransport, RelayConfig, test_env::RELAY_URL},
         utils::bls_pubkey_from_hex_unchecked,
     };
+
+    fn default_auth_data(url: &str) -> String {
+        String::from_utf8(get_default_auth_data(&Url::parse(url).unwrap()).unwrap()).unwrap()
+    }
+
+    // builder-specs specs/gloas/validator.md "Default auth data" table, verbatim
+    #[test]
+    fn default_auth_data_spec_vectors() {
+        for (url, data) in [
+            ("https://builder.example.com/", "builder.example.com"),
+            ("HTTPS://Builder.Example.com:443/bids?x=1", "builder.example.com"),
+            ("https://builder.example.com:8080", "builder.example.com"),
+            ("https://user:pw@builder.example.com/", "builder.example.com"),
+            ("https://10.0.0.5:18550/eth/v1/builder", "10.0.0.5"),
+            ("https://[0:0:0:0:0:0:0:1]:8443/", "[::1]"),
+            ("https://[::ffff:192.0.2.1]/", "[::ffff:c000:201]"),
+        ] {
+            assert_eq!(default_auth_data(url), data, "{url}");
+        }
+    }
+
+    #[test]
+    fn default_auth_data_is_ascii_and_lowercase() {
+        // an internationalized hostname in its punycode form
+        assert_eq!(default_auth_data("https://Bücher.example/"), "xn--bcher-kva.example");
+        // a host the URL parser leaves as written is still lowercased
+        assert_eq!(default_auth_data("builder://Builder.Example.com/"), "builder.example.com");
+        assert!(get_default_auth_data(&Url::parse("unix:/run/builder.sock").unwrap()).is_none());
+    }
 
     #[test]
     fn test_relay_entry() {
@@ -467,5 +554,55 @@ mod tests {
         }"#;
         let config = serde_json::from_str::<RelayConfig>(relay_config).unwrap();
         assert_eq!(config.get_header, GetHeaderTransport::Http);
+    }
+
+    #[test]
+    fn test_relay_url_get_execution_payload() {
+        let slot = 0;
+        let parent_hash = B256::ZERO;
+        let parent_root = B256::ZERO;
+        let validator_pubkey = bls_pubkey_from_hex_unchecked(
+            "0xac6e77dfe25ecd6110b8e780608cce0dab71fdd5ebea22a16c0205200f2f8e2e3ad3b71d3499c54ad14d6c21b41a37ae",
+        );
+        let expected = format!(
+            "http://0xa1cec75a3f0661e99299274182938151e8433c61a19222347ea1313d839229cb4ce4e3e5aa2bdeb71c8fcf1b084963c2@abc.xyz/eth/v1/builder/execution_payload_bid/{slot}/{parent_hash}/{parent_root}/{validator_pubkey}"
+        );
+
+        let relay_config = r#"
+        {
+            "url": "http://0xa1cec75a3f0661e99299274182938151e8433c61a19222347ea1313d839229cb4ce4e3e5aa2bdeb71c8fcf1b084963c2@abc.xyz"
+        }"#;
+
+        let config = serde_json::from_str::<RelayConfig>(relay_config).unwrap();
+        let relay = RelayClient::new(config).unwrap();
+
+        assert_eq!(
+            relay
+                .get_execution_payload_bid_url(slot, &parent_hash, &parent_root, &validator_pubkey)
+                .unwrap()
+                .to_string(),
+            expected
+        );
+
+        let relay_config = r#"
+        {
+            "url": "http://0xa1cec75a3f0661e99299274182938151e8433c61a19222347ea1313d839229cb4ce4e3e5aa2bdeb71c8fcf1b084963c2@abc.xyz//"
+        }"#;
+
+        let config = serde_json::from_str::<RelayConfig>(relay_config).unwrap();
+        let relay = RelayClient::new(config).unwrap();
+
+        assert_eq!(
+            relay
+                .get_execution_payload_bid_url(slot, &parent_hash, &parent_root, &validator_pubkey)
+                .unwrap()
+                .to_string(),
+            expected
+        );
+
+        assert_eq!(
+            relay.submit_builder_preferences_url(&validator_pubkey).unwrap().to_string(),
+            "http://0xa1cec75a3f0661e99299274182938151e8433c61a19222347ea1313d839229cb4ce4e3e5aa2bdeb71c8fcf1b084963c2@abc.xyz/eth/v1/builder/builder_preferences/0xac6e77dfe25ecd6110b8e780608cce0dab71fdd5ebea22a16c0205200f2f8e2e3ad3b71d3499c54ad14d6c21b41a37ae"
+        );
     }
 }
